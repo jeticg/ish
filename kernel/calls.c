@@ -220,6 +220,19 @@ void handle_interrupt(int interrupt) {
         }
     } else if (interrupt == INT_GPF) {
         printk("%d page fault on 0x%x at 0x%x\n", current->pid, cpu->segfault_addr, cpu->eip);
+        for (int i = 0; i < 16; i++) {
+            uint8_t b;
+            if (user_get(cpu->eip + i, b))
+                break;
+            printk("%02x ", b);
+        }
+        printk("\n");
+        if (cpu->segfault_addr == 0x8 && cpu->eip == 0xf7e26e91) {
+            debugger;
+            void dump_stack();
+            dump_stack();
+            abort();
+        }
         struct siginfo_ info = {
             .code = SI_KERNEL_,
             .fault.addr = cpu->segfault_addr,

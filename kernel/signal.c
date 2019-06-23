@@ -49,7 +49,7 @@ static void deliver_signal_unlocked(struct task *task, int sig, struct siginfo_ 
     task->pending |= 1l << sig;
     struct sigqueue *sigqueue = malloc(sizeof(struct sigqueue));
     sigqueue->info = info;
-    sigqueue->info.signo = sig;
+    sigqueue->info.sig = sig;
     list_add_tail(&task->queue, &sigqueue->queue);
 
     if (task->blocked & (1l << sig) && signal_is_blockable(sig))
@@ -134,8 +134,47 @@ int send_group_signal(dword_t pgid, int sig, struct siginfo_ info) {
     return 0;
 }
 
+static addr_t sigreturn_trampoline() {
+    addr_t sigreturn_addr = vdso_symbol("__kernel_rt_sigreturn");
+    if (sigreturn_addr == 0) {
+        die("sigreturn not found in vdso, this should never happen");
+    }
+    return current->mm->vdso + sigreturn_addr;
+}
+
+static void setup_sigcontext(struct sigcontext_ *sc, struct cpu_state *cpu) {
+    sc->ax = cpu->eax;
+    sc->bx = cpu->ebx;
+    sc->cx = cpu->ecx;
+    sc->dx = cpu->edx;
+    sc->di = cpu->edi;
+    sc->si = cpu->esi;
+    sc->bp = cpu->ebp;
+    sc->sp = sc->sp_at_signal = cpu->esp;
+    sc->ip = cpu->eip;
+    collapse_flags(cpu);
+    sc->flags = cpu->eflags;
+    sc->trapno = cpu->trapno;
+    // TODO more shit
+}
+
+static void setup_sigframe(struct siginfo_ *info, struct sigframe_ *frame) {
+    frame->pretcode = sigreturn_trampoline();
+    frame->sig = info->sig;
+    frame->sc.oldmask = current->blocked & 0xffffffff;
+    frame->extramask = current->blocked >> 32;
+    setup_sigcontext(&frame->sc, &current->cpu);
+    frame->retcode = SIGFRAME_RETCODE;
+}
+
+static void setup_rt_sigframe(struct siginfo_ *info, struct rt_sigframe_ *frame) {
+    frame->pretcode = sigreturn_trampoline();
+    frame->sig = info->sig;
+    frame->retcode = SIGFRAME_RETCODE;
+}
+
 static void receive_signal(struct sighand *sighand, struct siginfo_ *info) {
-    int sig = info->signo;
+    int sig = info->sig;
     STRACE("%d receiving signal %d\n", current->pid, sig);
     current->pending &= ~(1l << sig);
 
@@ -156,41 +195,24 @@ static void receive_signal(struct sighand *sighand, struct siginfo_ *info) {
     }
 
     // setup the frame
-    struct sigframe_ frame = {};
-    frame.sig = sig;
-    frame.sc.oldmask = current->blocked & 0xffffffff;
-    frame.extramask = current->blocked >> 32;
-
-    struct cpu_state *cpu = &current->cpu;
-    frame.sc.ax = cpu->eax;
-    frame.sc.bx = cpu->ebx;
-    frame.sc.cx = cpu->ecx;
-    frame.sc.dx = cpu->edx;
-    frame.sc.di = cpu->edi;
-    frame.sc.si = cpu->esi;
-    frame.sc.bp = cpu->ebp;
-    frame.sc.sp = frame.sc.sp_at_signal = cpu->esp;
-    frame.sc.ip = cpu->eip;
-    collapse_flags(cpu);
-    frame.sc.flags = cpu->eflags;
-    frame.sc.trapno = cpu->trapno;
-    // TODO more shit
-
-    addr_t sigreturn_addr = vdso_symbol("__kernel_rt_sigreturn");
-    if (sigreturn_addr == 0) {
-        die("sigreturn not found in vdso, this should never happen");
+    union {
+        struct sigframe_ sigframe;
+        struct rt_sigframe_ rt_sigframe;
+    } frame;
+    size_t frame_size;
+    if (sighand->action[info->sig].flags & SA_SIGINFO_) {
+        setup_sigframe(info, &frame.sigframe);
+        frame_size = sizeof(frame.sigframe);
+    } else {
+        setup_rt_sigframe(info, &frame.rt_sigframe);
+        frame_size = sizeof(frame.rt_sigframe);
     }
-    frame.pretcode = current->mm->vdso + sigreturn_addr;
-    // for legacy purposes
-    frame.retcode.popmov = 0xb858;
-    frame.retcode.nr_sigreturn = 173; // rt_sigreturn
-    frame.retcode.int80 = 0x80cd;
 
     // set up registers for signal handler
-    cpu->eax = sig;
-    cpu->eip = sighand->action[sig].handler;
+    current->cpu.eax = info->sig;
+    current->cpu.eip = sighand->action[info->sig].handler;
 
-    dword_t sp = cpu->esp;
+    dword_t sp = current->cpu.esp;
     if (sighand->altstack) {
         sp = sighand->altstack + sighand->altstack_size;
         sighand->on_altstack = true;
@@ -206,15 +228,15 @@ static void receive_signal(struct sighand *sighand, struct siginfo_ *info) {
     sp -= sizeof(struct sigframe_);
     // align sp + 4 on a 16-byte boundary because that's what the abi says
     sp = ((sp + 4) & ~0xf) - 4;
-    cpu->esp = sp;
+    current->cpu.esp = sp;
 
     // block the signal while running the handler
-    current->blocked |= (1l << sig);
+    current->blocked |= (1l << info->sig);
 
     // install frame
-    // nothing we can do if this fails
+    (void) user_write(sp, &frame, frame_size);
+    // nothing we can do if that fails
     // TODO do something other than nothing, like printk maybe
-    (void) user_put(sp, frame);
 }
 
 bool receive_signals() {
@@ -227,7 +249,7 @@ bool receive_signals() {
     lock(&sighand->lock);
     struct sigqueue *sigqueue, *tmp;
     list_for_each_entry_safe(&current->queue, sigqueue, tmp, queue) {
-        if (current->blocked & sigqueue->info.signo)
+        if (current->blocked & sigqueue->info.sig)
             continue;
         list_remove(&sigqueue->queue);
         receive_signal(sighand, &sigqueue->info);

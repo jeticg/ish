@@ -10,6 +10,9 @@ typedef qword_t sigset_t_;
 #define SIG_ERR_ -1
 #define SIG_DFL_ 0
 #define SIG_IGN_ 1
+
+#define SA_SIGINFO_ 4
+
 struct sigaction_ {
     addr_t handler;
     dword_t flags;
@@ -63,7 +66,7 @@ union sigval_ {
 };
 
 struct siginfo_ {
-    int_t signo;
+    int_t sig;
     int_t code;
     int_t sig_errno;
     union {
@@ -182,6 +185,14 @@ struct sigcontext_ {
     dword_t cr2;
 };
 
+struct ucontext_ {
+    uint_t flags;
+    uint_t link;
+    struct stack_t_ stack;
+    struct sigcontext_ mcontext;
+    sigset_t_ sigmask;
+};
+
 struct fpreg_ {
     word_t significand[4];
     word_t exponent;
@@ -219,17 +230,37 @@ struct fpstate_ {
     dword_t padding[56];
 };
 
+struct sigframe_retcode {
+    uint16_t popmov;
+    dword_t nr_sigreturn;
+    uint16_t int80;
+} __attribute__((packed));
+static const struct sigframe_retcode SIGFRAME_RETCODE = {
+    .popmov = 0xb858,
+    .nr_sigreturn = 173,
+    .int80 = 0x80cd,
+};
+
 struct sigframe_ {
     addr_t pretcode;
     dword_t sig;
     struct sigcontext_ sc;
     struct fpstate_ fpstate;
     dword_t extramask;
-    struct {
-        uint16_t popmov;
-        dword_t nr_sigreturn;
-        uint16_t int80;
-    } __attribute__((packed)) retcode;
+    struct sigframe_retcode retcode;
+};
+
+struct rt_sigframe_ {
+    addr_t pretcode;
+    int_t sig;
+    addr_t pinfo;
+    addr_t puc;
+    union {
+        struct siginfo_ info;
+        char __pad[128];
+    };
+    struct ucontext_ uc;
+    struct sigframe_retcode retcode;
 };
 
 // On a 64-bit system with 32-bit emulation, the fpu state is stored in extra
