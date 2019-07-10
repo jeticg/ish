@@ -38,7 +38,7 @@ static NSString *const kPreferenceBootEnabledKey = @"Boot Enabled";
                                       kPreferenceThemeKey: defaultTheme.properties,
                                       kPreferenceCapsLockMappingKey: @(CapsLockMapControl),
                                       kPreferenceDisableDimmingKey: @(NO),
-                                      kPreferenceLaunchCommandKey: @[@"/bin/login", @"-f", @"root"],
+                                      kPreferenceLaunchCommandKey: @[@"/bin/login"],
                                       kPreferenceBootCommandKey: @[@"/sbin/init"],
                                       kPreferenceBootEnabledKey: @(YES),
                                       }];
